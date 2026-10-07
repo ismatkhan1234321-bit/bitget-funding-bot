@@ -1,4 +1,5 @@
 import app from "./app";
+import { startFundingMonitor } from "./lib/fundingMonitor";
 import { logger } from "./lib/logger";
 
 const rawPort = process.env["PORT"];
@@ -14,6 +15,8 @@ const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
+
+startFundingMonitor();
 
 app.listen(port, (err) => {
   if (err) {
