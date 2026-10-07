@@ -2,8 +2,13 @@ import { logger } from "./logger";
 
 const BITGET_TICKERS_URL =
   "https://api.bitget.com/api/v2/mix/market/tickers";
-const TELEGRAM_POLL_INTERVAL_MS = 5 * 60 * 1000;
-const FUNDING_THRESHOLD = -0.0003;
+const TELEGRAM_POLL_INTERVAL_MS = 15 * 60 * 1000;
+const BITGET_REQUEST_TIMEOUT_MS = 10_000;
+const MIN_QUOTE_VOLUME_USDT = 50_000_000;
+const MIN_LAST_PRICE_USDT = 0.1;
+const MIN_FUNDING_RATE = -0.0025; // -0.25%
+const MAX_FUNDING_RATE = -0.0003; // -0.03%
+const BLACKLIST = ["SAMSUNG", "STOCK", "MET", "CL", "BR", "ORCA", "FLOCK"];
 
 interface BitgetTickerResponse {
   code?: unknown;
@@ -65,7 +70,7 @@ async function checkFunding(
   url.searchParams.set("productType", "USDT-FUTURES");
 
   const response = await fetch(url, {
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(BITGET_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -90,22 +95,43 @@ async function checkFunding(
     }
 
     const ticker = entry as Record<string, unknown>;
+    const rawSymbol = ticker["symbol"];
+    if (typeof rawSymbol !== "string") {
+      continue;
+    }
+
+    const symbol = rawSymbol.toUpperCase();
+    if (BLACKLIST.some((blockedName) => symbol.includes(blockedName))) {
+      continue;
+    }
+
+    const lastPrice = Number(ticker["lastPr"]);
     const fundingRate = Number(ticker["fundingRate"]);
-    if (!Number.isFinite(fundingRate) || fundingRate >= FUNDING_THRESHOLD) {
+    const quoteVolume = Number(ticker["quoteVolume"]);
+    if (
+      !Number.isFinite(lastPrice) ||
+      !Number.isFinite(fundingRate) ||
+      !Number.isFinite(quoteVolume)
+    ) {
+      continue;
+    }
+
+    if (
+      quoteVolume < MIN_QUOTE_VOLUME_USDT ||
+      lastPrice < MIN_LAST_PRICE_USDT ||
+      fundingRate <= MIN_FUNDING_RATE ||
+      fundingRate >= MAX_FUNDING_RATE
+    ) {
       continue;
     }
 
     matching += 1;
-    const symbol =
-      typeof ticker["symbol"] === "string" ? ticker["symbol"] : "Unknown symbol";
-    const price =
-      typeof ticker["lastPr"] === "string" ||
-      typeof ticker["lastPr"] === "number"
-        ? String(ticker["lastPr"])
-        : "unavailable";
     const text =
-      `Funding alert: ${symbol} is at ${(fundingRate * 100).toFixed(3)}%` +
-      ` (below -0.030%). Price: ${price}. Check market conditions before trading.`;
+      `🚨 REAL ALERT: ${symbol}\n` +
+      `Funding: ${(fundingRate * 100).toFixed(3)}%\n` +
+      `Price: ${lastPrice}\n` +
+      `24h Vol: $${(quoteVolume / 1_000_000).toFixed(1)}M\n\n` +
+      "Chart check karo - Long ka moka ho sakta hai!";
 
     await sendTelegramMessage(botToken, chatId, text);
     sent += 1;
@@ -119,7 +145,16 @@ export function startFundingMonitor(): void {
   const chatId = getRequiredEnvironmentVariable("TELEGRAM_CHAT_ID");
 
   logger.info(
-    { threshold: FUNDING_THRESHOLD, pollIntervalMs: TELEGRAM_POLL_INTERVAL_MS },
+    {
+      fundingRange: {
+        greaterThan: MIN_FUNDING_RATE,
+        lessThan: MAX_FUNDING_RATE,
+      },
+      minimumQuoteVolumeUsdt: MIN_QUOTE_VOLUME_USDT,
+      minimumLastPriceUsdt: MIN_LAST_PRICE_USDT,
+      pollIntervalMs: TELEGRAM_POLL_INTERVAL_MS,
+      blacklistEntries: BLACKLIST.length,
+    },
     "Funding monitor started",
   );
 
