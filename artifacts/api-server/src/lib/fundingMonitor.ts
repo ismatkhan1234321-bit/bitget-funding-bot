@@ -1,19 +1,48 @@
+import { access, appendFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import ccxt from "ccxt";
 import { logger } from "./logger";
 
-const BITGET_TICKERS_URL =
-  "https://api.bitget.com/api/v2/mix/market/tickers";
-const TELEGRAM_POLL_INTERVAL_MS = 15 * 60 * 1000;
-const BITGET_REQUEST_TIMEOUT_MS = 10_000;
+const POLL_INTERVAL_MS = 15 * 60 * 1000;
+const ERROR_RETRY_INTERVAL_MS = 60 * 1000;
+const FUNDING_TIERS = {
+  longTier1: -0.003,
+  longTier2: -0.005,
+  shortTier1: 0.003,
+  shortTier2: 0.005,
+} as const;
 const MIN_QUOTE_VOLUME_USDT = 50_000_000;
-const MIN_LAST_PRICE_USDT = 0.1;
-const MIN_FUNDING_RATE = -0.0025; // -0.25%
-const MAX_FUNDING_RATE = -0.0003; // -0.03%
-const BLACKLIST = ["SAMSUNG", "STOCK", "MET", "CL", "BR", "ORCA", "FLOCK"];
+const MIN_OI_INCREASE_PERCENT = 5;
+const MARKET_PARAMS = { productType: "USDT-FUTURES" };
+const BLACKLIST = ["BZ", "SOXL", "OIL", "GOLD", "SILVER", "SPX", "NDX", "DXY"];
+const TRADE_LOG_PATH = path.resolve(process.cwd(), "trade_log.csv");
+const TRADE_LOG_HEADER =
+  "timestamp,symbol,funding_percent,volume_usdt,alert_type,price,ma25,oi_change_percent\n";
 
-interface BitgetTickerResponse {
-  code?: unknown;
-  data?: unknown;
+const exchange = new ccxt.bitget({
+  enableRateLimit: true,
+  timeout: 10_000,
+  options: { defaultType: "swap" },
+});
+const oiHistory = new Map<string, number>();
+let tradeLogReady = false;
+
+type AlertType = "LONG" | "STRONG LONG" | "SHORT" | "STRONG SHORT";
+
+interface FundingTier {
+  alertType: AlertType;
+  tierText: string;
+  strong: boolean;
+  direction: "LONG" | "SHORT";
 }
+
+interface MovingAverages {
+  lastPrice: number;
+  ma25: number;
+  ma7: number;
+}
+
+class TelegramDeliveryError extends Error {}
 
 function getRequiredEnvironmentVariable(name: string): string {
   const value = process.env[name]?.trim();
@@ -30,15 +59,20 @@ async function sendTelegramMessage(
   chatId: string,
   text: string,
 ): Promise<void> {
-  const response = await fetch(
-    `https://api.telegram.org/bot${botToken}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
-      signal: AbortSignal.timeout(15_000),
-    },
-  );
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text }),
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+  } catch {
+    throw new TelegramDeliveryError("Telegram request failed.");
+  }
 
   if (!response.ok) {
     let description = `HTTP ${response.status}`;
@@ -53,91 +87,306 @@ async function sendTelegramMessage(
     } catch {
       // Keep the HTTP status as the error when Telegram does not return JSON.
     }
-    throw new Error(`Telegram rejected the alert: ${description}.`);
+    throw new TelegramDeliveryError(
+      `Telegram rejected the alert: ${description}.`,
+    );
   }
 
   const result = (await response.json()) as { ok?: unknown };
   if (result.ok !== true) {
-    throw new Error("Telegram did not accept the alert.");
+    throw new TelegramDeliveryError("Telegram did not accept the alert.");
   }
 }
 
-async function checkFunding(
+function isCryptoOnly(symbol: string): boolean {
+  const normalized = symbol.toUpperCase();
+  return (
+    normalized.includes("USDT") &&
+    !BLACKLIST.some((blockedName) => normalized.includes(blockedName))
+  );
+}
+
+function getFundingTier(fundingRate: number): FundingTier | null {
+  if (fundingRate <= FUNDING_TIERS.longTier2) {
+    return {
+      alertType: "STRONG LONG",
+      tierText: "🔥🔥 SUPER SHORT SQUEEZE (-0.5%)",
+      strong: true,
+      direction: "LONG",
+    };
+  }
+  if (fundingRate <= FUNDING_TIERS.longTier1) {
+    return {
+      alertType: "LONG",
+      tierText: "🔥 SHORT SQUEEZE (-0.3%)",
+      strong: false,
+      direction: "LONG",
+    };
+  }
+  if (fundingRate >= FUNDING_TIERS.shortTier2) {
+    return {
+      alertType: "STRONG SHORT",
+      tierText: "❄️❄️ SUPER LONG SQUEEZE (+0.5%)",
+      strong: true,
+      direction: "SHORT",
+    };
+  }
+  if (fundingRate >= FUNDING_TIERS.shortTier1) {
+    return {
+      alertType: "SHORT",
+      tierText: "❄️ LONG SQUEEZE (+0.3%)",
+      strong: false,
+      direction: "SHORT",
+    };
+  }
+  return null;
+}
+
+async function getMovingAverages(
+  symbol: string,
+): Promise<MovingAverages | null> {
+  try {
+    const candles = await exchange.fetchOHLCV(
+      symbol,
+      "15m",
+      undefined,
+      30,
+      MARKET_PARAMS,
+    );
+    const closes = candles
+      .map((candle) => candle[4])
+      .filter((close): close is number => Number.isFinite(close));
+
+    if (closes.length < 25) {
+      return null;
+    }
+
+    const mean = (values: number[]) =>
+      values.reduce((total, value) => total + value, 0) / values.length;
+    return {
+      lastPrice: closes[closes.length - 1]!,
+      ma25: mean(closes.slice(-25)),
+      ma7: mean(closes.slice(-7)),
+    };
+  } catch (error) {
+    logger.warn(
+      { symbol, error: error instanceof Error ? error.message : "Unknown error" },
+      "Unable to fetch Bitget candles",
+    );
+    return null;
+  }
+}
+
+function formatPaktTimestamp(date: Date): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Karachi",
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(date)
+      .map(({ type, value }) => [type, value]),
+  );
+
+  return `${parts["day"]}-${parts["month"]} ${parts["hour"]}:${parts["minute"]}:${parts["second"]} PKT`;
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
+}
+
+function csvCell(value: string | number): string {
+  return `"${String(value).replaceAll('"', '""')}"`;
+}
+
+async function appendTradeLog(values: Array<string | number>): Promise<void> {
+  if (!tradeLogReady) {
+    try {
+      await access(TRADE_LOG_PATH);
+    } catch (error) {
+      if (!isErrorCode(error, "ENOENT")) {
+        throw error;
+      }
+      try {
+        await writeFile(TRADE_LOG_PATH, TRADE_LOG_HEADER, {
+          encoding: "utf8",
+          flag: "wx",
+        });
+      } catch (writeError) {
+        if (!isErrorCode(writeError, "EEXIST")) {
+          throw writeError;
+        }
+      }
+    }
+    tradeLogReady = true;
+  }
+
+  const row = values.map(csvCell).join(",") + "\n";
+  await appendFile(TRADE_LOG_PATH, row, "utf8");
+}
+
+async function checkSymbol(
+  symbol: string,
+  fundingRate: number,
+  volume: number,
+  tier: FundingTier,
   botToken: string,
   chatId: string,
-): Promise<{ matching: number; sent: number }> {
-  const url = new URL(BITGET_TICKERS_URL);
-  url.searchParams.set("productType", "USDT-FUTURES");
-
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(BITGET_REQUEST_TIMEOUT_MS),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Bitget returned HTTP ${response.status}.`);
+): Promise<boolean> {
+  if (!isCryptoOnly(symbol) || volume < MIN_QUOTE_VOLUME_USDT) {
+    return false;
   }
 
-  const payload = (await response.json()) as BitgetTickerResponse;
-  if (payload.code !== "00000") {
-    throw new Error(`Bitget returned API code ${String(payload.code ?? "unknown")}.`);
+  const averages = await getMovingAverages(symbol);
+  if (!averages) {
+    return false;
+  }
+  if (tier.direction === "LONG" && averages.lastPrice < averages.ma25) {
+    logger.info({ symbol }, "Signal skipped: price is below MA25 for LONG");
+    return false;
+  }
+  if (tier.direction === "SHORT" && averages.lastPrice > averages.ma25) {
+    logger.info({ symbol }, "Signal skipped: price is above MA25 for SHORT");
+    return false;
   }
 
-  if (!Array.isArray(payload.data)) {
-    throw new Error("Bitget returned an unexpected ticker response.");
+  let openInterest: number;
+  try {
+    const oiData = await exchange.fetchOpenInterest(symbol, MARKET_PARAMS);
+    openInterest = Number(oiData.openInterestAmount);
+  } catch (error) {
+    logger.warn(
+      { symbol, error: error instanceof Error ? error.message : "Unknown error" },
+      "Unable to fetch open interest; signal skipped",
+    );
+    return false;
   }
 
-  let matching = 0;
+  if (!Number.isFinite(openInterest) || openInterest <= 0) {
+    logger.warn({ symbol }, "Open interest was unavailable; signal skipped");
+    return false;
+  }
+
+  const previousOpenInterest = oiHistory.get(symbol);
+  oiHistory.set(symbol, openInterest);
+  const oiChange =
+    previousOpenInterest !== undefined && previousOpenInterest !== 0
+      ? ((openInterest - previousOpenInterest) / previousOpenInterest) * 100
+      : null;
+
+  if (!tier.strong && oiChange === null) {
+    logger.info(
+      { symbol },
+      "Open-interest baseline saved; waiting for the next scan",
+    );
+    return false;
+  }
+  if (!tier.strong && oiChange !== null && oiChange < MIN_OI_INCREASE_PERCENT) {
+    logger.info({ symbol, oiChange }, "Signal skipped: OI increase is below 5%");
+    return false;
+  }
+
+  const fundingPercent = fundingRate * 100;
+  const oiDisplay = oiChange === null ? "Baseline pending" : `${oiChange.toFixed(2)}%`;
+  const passedCriteria = tier.strong
+    ? "Crypto | Vol>50M | MA25 | Strong tier (OI available)"
+    : "Crypto | Vol>50M | MA25 | OI>5%";
+  const message =
+    `${tier.tierText}\n` +
+    `${tier.alertType} | ${symbol}\n\n` +
+    `💰 Funding: ${fundingPercent.toFixed(4)}%\n` +
+    `📊 Vol 24h: $${(volume / 1_000_000).toFixed(1)}M\n` +
+    `📈 OI Change: ${oiDisplay}\n` +
+    `💵 Price: ${averages.lastPrice}\n` +
+    `MA7: ${averages.ma7.toFixed(4)} | MA25: ${averages.ma25.toFixed(4)}\n\n` +
+    `✅ Passed: ${passedCriteria}\n` +
+    `⏰ ${formatPaktTimestamp(new Date())} - 24H ACTIVE`;
+
+  await sendTelegramMessage(botToken, chatId, message);
+  try {
+    await appendTradeLog([
+      formatPaktTimestamp(new Date()),
+      symbol,
+      fundingPercent,
+      volume,
+      tier.alertType,
+      averages.lastPrice,
+      averages.ma25,
+      oiChange ?? "",
+    ]);
+  } catch (error) {
+    logger.error(
+      { symbol, error: error instanceof Error ? error.message : "Unknown error" },
+      "Alert was delivered, but trade log could not be saved",
+    );
+  }
+
+  logger.info({ symbol, alertType: tier.alertType }, "Telegram funding alert sent");
+  return true;
+}
+
+async function scanFunding(
+  botToken: string,
+  chatId: string,
+): Promise<{ candidates: number; sent: number }> {
+  const fundingRates = await exchange.fetchFundingRates(undefined, MARKET_PARAMS);
+  const tickers = await exchange.fetchTickers(undefined, MARKET_PARAMS);
+  let candidates = 0;
   let sent = 0;
 
-  for (const entry of payload.data as unknown[]) {
-    if (typeof entry !== "object" || entry === null) {
+  for (const [symbol, funding] of Object.entries(fundingRates)) {
+    if (!isCryptoOnly(symbol)) {
+      continue;
+    }
+    const fundingRate = Number(funding.fundingRate);
+    const volume = Number(tickers[symbol]?.quoteVolume ?? 0);
+    if (!Number.isFinite(fundingRate) || !Number.isFinite(volume)) {
+      continue;
+    }
+    const tier = getFundingTier(fundingRate);
+    if (!tier || volume < MIN_QUOTE_VOLUME_USDT) {
       continue;
     }
 
-    const ticker = entry as Record<string, unknown>;
-    const rawSymbol = ticker["symbol"];
-    if (typeof rawSymbol !== "string") {
-      continue;
+    candidates += 1;
+    try {
+      if (
+        await checkSymbol(
+          symbol,
+          fundingRate,
+          volume,
+          tier,
+          botToken,
+          chatId,
+        )
+      ) {
+        sent += 1;
+      }
+    } catch (error) {
+      if (error instanceof TelegramDeliveryError) {
+        logger.error(
+          { symbol, error: error.message },
+          "Unable to send Telegram funding alert; remaining alerts skipped this scan",
+        );
+        break;
+      }
+      logger.warn(
+        { symbol, error: error instanceof Error ? error.message : "Unknown error" },
+        "Unable to process funding candidate",
+      );
     }
-
-    const symbol = rawSymbol.toUpperCase();
-    if (BLACKLIST.some((blockedName) => symbol.includes(blockedName))) {
-      continue;
-    }
-
-    const lastPrice = Number(ticker["lastPr"]);
-    const fundingRate = Number(ticker["fundingRate"]);
-    const quoteVolume = Number(ticker["quoteVolume"]);
-    if (
-      !Number.isFinite(lastPrice) ||
-      !Number.isFinite(fundingRate) ||
-      !Number.isFinite(quoteVolume)
-    ) {
-      continue;
-    }
-
-    if (
-      quoteVolume < MIN_QUOTE_VOLUME_USDT ||
-      lastPrice < MIN_LAST_PRICE_USDT ||
-      fundingRate <= MIN_FUNDING_RATE ||
-      fundingRate >= MAX_FUNDING_RATE
-    ) {
-      continue;
-    }
-
-    matching += 1;
-    const text =
-      `🚨 REAL ALERT: ${symbol}\n` +
-      `Funding: ${(fundingRate * 100).toFixed(3)}%\n` +
-      `Price: ${lastPrice}\n` +
-      `24h Vol: $${(quoteVolume / 1_000_000).toFixed(1)}M\n\n` +
-      "Chart check karo - Long ka moka ho sakta hai!";
-
-    await sendTelegramMessage(botToken, chatId, text);
-    sent += 1;
   }
 
-  return { matching, sent };
+  return { candidates, sent };
 }
 
 export function startFundingMonitor(): void {
@@ -146,29 +395,29 @@ export function startFundingMonitor(): void {
 
   logger.info(
     {
-      fundingRange: {
-        greaterThan: MIN_FUNDING_RATE,
-        lessThan: MAX_FUNDING_RATE,
-      },
+      fundingTiers: FUNDING_TIERS,
       minimumQuoteVolumeUsdt: MIN_QUOTE_VOLUME_USDT,
-      minimumLastPriceUsdt: MIN_LAST_PRICE_USDT,
-      pollIntervalMs: TELEGRAM_POLL_INTERVAL_MS,
+      minimumOiIncreasePercent: MIN_OI_INCREASE_PERCENT,
+      pollIntervalMs: POLL_INTERVAL_MS,
       blacklistEntries: BLACKLIST.length,
+      exchange: "Bitget",
     },
     "Funding monitor started",
   );
 
   const poll = async (): Promise<void> => {
+    let nextDelay = POLL_INTERVAL_MS;
     try {
-      const result = await checkFunding(botToken, chatId);
-      logger.info(result, "Funding monitor poll completed");
+      const result = await scanFunding(botToken, chatId);
+      logger.info(result, "Funding scan complete; next scan in 15 minutes");
     } catch (error) {
+      nextDelay = ERROR_RETRY_INTERVAL_MS;
       logger.error(
         { error: error instanceof Error ? error.message : "Unknown error" },
-        "Funding monitor poll failed",
+        "Funding scan failed; retrying in 1 minute",
       );
     } finally {
-      setTimeout(() => void poll(), TELEGRAM_POLL_INTERVAL_MS);
+      setTimeout(() => void poll(), nextDelay);
     }
   };
 
