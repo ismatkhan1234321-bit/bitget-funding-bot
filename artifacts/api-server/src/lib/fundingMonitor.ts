@@ -12,7 +12,7 @@ const FUNDING_TIERS = {
   shortTier2: 0.005,
 } as const;
 const MIN_QUOTE_VOLUME_USDT = 50_000_000;
-const MIN_OI_INCREASE_PERCENT = 5;
+const MIN_OI_INCREASE_PERCENT = 2;
 const MARKET_PARAMS = { productType: "USDT-FUTURES" };
 const BLACKLIST = ["BZ", "SOXL", "OIL", "GOLD", "SILVER", "SPX", "NDX", "DXY"];
 const TRADE_LOG_PATH = path.resolve(process.cwd(), "trade_log.csv");
@@ -291,7 +291,7 @@ async function checkSymbol(
     return false;
   }
   if (!tier.strong && oiChange !== null && oiChange < MIN_OI_INCREASE_PERCENT) {
-    logger.info({ symbol, oiChange }, "Signal skipped: OI increase is below 5%");
+    logger.info({ symbol, oiChange }, "Signal skipped: OI increase is below 2%");
     return false;
   }
 
@@ -299,7 +299,7 @@ async function checkSymbol(
   const oiDisplay = oiChange === null ? "Baseline pending" : `${oiChange.toFixed(2)}%`;
   const passedCriteria = tier.strong
     ? "Crypto | Vol>50M | MA25 | Strong tier (OI available)"
-    : "Crypto | Vol>50M | MA25 | OI>5%";
+    : "Crypto | Vol>50M | MA25 | OI>2%";
   const message =
     `${tier.tierText}\n` +
     `${tier.alertType} | ${symbol}\n\n` +
