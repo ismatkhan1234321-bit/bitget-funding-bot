@@ -12,7 +12,7 @@ const FUNDING_TIERS = {
   shortTier2: 0.005,
 } as const;
 const MIN_QUOTE_VOLUME_USDT = 50_000_000;
-const MIN_OI_INCREASE_PERCENT = 2;
+const OI_MIN_INCREASE = 2;
 const MARKET_PARAMS = { productType: "USDT-FUTURES" };
 const BLACKLIST = ["BZ", "SOXL", "OIL", "GOLD", "SILVER", "SPX", "NDX", "DXY"];
 const TRADE_LOG_PATH = path.resolve(process.cwd(), "trade_log.csv");
@@ -290,7 +290,7 @@ async function checkSymbol(
     );
     return false;
   }
-  if (!tier.strong && oiChange !== null && oiChange < MIN_OI_INCREASE_PERCENT) {
+  if (!tier.strong && oiChange !== null && oiChange < OI_MIN_INCREASE) {
     logger.info({ symbol, oiChange }, "Signal skipped: OI increase is below 2%");
     return false;
   }
@@ -397,7 +397,7 @@ export function startFundingMonitor(): void {
     {
       fundingTiers: FUNDING_TIERS,
       minimumQuoteVolumeUsdt: MIN_QUOTE_VOLUME_USDT,
-      minimumOiIncreasePercent: MIN_OI_INCREASE_PERCENT,
+      minimumOiIncreasePercent: OI_MIN_INCREASE,
       pollIntervalMs: POLL_INTERVAL_MS,
       blacklistEntries: BLACKLIST.length,
       exchange: "Bitget",
