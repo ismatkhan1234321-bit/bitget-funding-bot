@@ -11,7 +11,7 @@ const FUNDING_TIERS = {
   shortTier1: 0.003,
   shortTier2: 0.005,
 } as const;
-const MIN_QUOTE_VOLUME_USDT = 50_000_000;
+const MIN_QUOTE_VOLUME_USDT = 30_000_000;
 const OI_MIN_INCREASE = 2;
 const MARKET_PARAMS = { productType: "USDT-FUTURES" };
 const BLACKLIST = ["BZ", "SOXL", "OIL", "GOLD", "SILVER", "SPX", "NDX", "DXY"];
@@ -250,13 +250,15 @@ async function checkSymbol(
   if (!averages) {
     return false;
   }
-  if (tier.direction === "LONG" && averages.lastPrice < averages.ma25) {
-    logger.info({ symbol }, "Signal skipped: price is below MA25 for LONG");
-    return false;
-  }
-  if (tier.direction === "SHORT" && averages.lastPrice > averages.ma25) {
-    logger.info({ symbol }, "Signal skipped: price is above MA25 for SHORT");
-    return false;
+  if (!tier.strong) {
+    if (tier.direction === "LONG" && averages.lastPrice < averages.ma25) {
+      logger.info({ symbol }, "Signal skipped: price is below MA25 for LONG");
+      return false;
+    }
+    if (tier.direction === "SHORT" && averages.lastPrice > averages.ma25) {
+      logger.info({ symbol }, "Signal skipped: price is above MA25 for SHORT");
+      return false;
+    }
   }
 
   let openInterest: number;
@@ -298,8 +300,8 @@ async function checkSymbol(
   const fundingPercent = fundingRate * 100;
   const oiDisplay = oiChange === null ? "Baseline pending" : `${oiChange.toFixed(2)}%`;
   const passedCriteria = tier.strong
-    ? "Crypto | Vol>50M | MA25 | Strong tier (OI available)"
-    : "Crypto | Vol>50M | MA25 | OI>2%";
+    ? "Crypto | Vol>30M | Strong tier (MA25 bypassed; OI available)"
+    : "Crypto | Vol>30M | MA25 | OI>2%";
   const message =
     `${tier.tierText}\n` +
     `${tier.alertType} | ${symbol}\n\n` +
