@@ -75,7 +75,23 @@ async function sendTelegramMessage(
     throw new Error("Telegram did not accept the alert.");
   }
 }
+function calculateSignalScore(fundingRate: number, volume: number): number {
+  let score = 0;
+  const absRate = Math.abs(fundingRate);
+  if (absRate >= 0.003) score += 50;
+  else if (absRate >= 0.001) score += 30;
+  else score += 15;
+  if (volume > 100_000_000) score += 50;
+  else if (volume > 50_000_000) score += 30;
+  else score += 20;
+  return Math.min(score, 100);
+}
 
+function getSignalQuality(score: number): string {
+  if (score >= 80) return "🔥 HIGH QUALITY - Strong Trade";
+  if (score >= 60) return "✅ GOOD - Decent Trade";
+  return "⚠️ LOW - Be Careful / Small Size";
+}
 async function scanFunding(
   botToken: string,
   chatId: string,
@@ -91,32 +107,30 @@ async function scanFunding(
       continue;
     }
 
-    const fundingRate = Number(funding.fundingRate);
-    const ticker = tickers[symbol];
-    const volume = Number(ticker?.quoteVolume);
-    if (!Number.isFinite(fundingRate) || !Number.isFinite(volume)) {
-      continue;
-    }
+      try {
+        const ticker = tickers[symbol];
+        const fundingRate = (funding as any)?.fundingRate?? 0;
+        const volume = ticker?.quoteVolume?? 0;
 
-    if (volume < MIN_VOLUME_USDT) {
-      continue;
-    }
+        if (Math.abs(fundingRate) < 0.0005) {
+          continue;
+        }
 
-    const alertType = getAlertType(fundingRate);
-    if (!alertType) {
-      continue;
-    }
+        const alertType = fundingRate > 0? "SHORT" : "LONG";
 
-    candidates += 1;
-    const fundingPercent = fundingRate * 100;
-    const price = ticker?.last ?? ticker?.close ?? "Unavailable";
-    const message =
-      `🚨 ${alertType} ALERT\n` +
-      `${symbol}\n` +
-      `Funding: ${fundingPercent.toFixed(3)}%\n` +
-      `24h Volume: $${(volume / 1_000_000).toFixed(1)}M\n` +
-      `Price: ${price}`;
-
+        candidates += 1;
+        const fundingPercent = fundingRate * 100;
+        const price = ticker?.last?? ticker?.close?? "Unavailable";
+        const score = calculateSignalScore(fundingRate, volume);
+        const quality = getSignalQuality(score);
+        const message =
+          `🚨 ${alertType} ALERT\n` +
+          `${symbol}\n` +
+          `Funding: ${fundingPercent.toFixed(3)}%\n` +
+          `24h Volume: $${(volume / 1_000_000).toFixed(1)}M\n` +
+          `Price: ${price}\n\n` +
+          `📊 SCORE: ${score}/100\n` +
+          `${quality}`;
     try {
       await sendTelegramMessage(botToken, chatId, message);
       sent += 1;
@@ -131,7 +145,19 @@ async function scanFunding(
         "Unable to send Binance funding alert",
       );
     }
+  } catch (error) {
+    logger.error(
+      {
+        symbol,
+        error: error instanceof Error ? error.message : "Unknown error",
+      },
+      "Error processing funding",
+    );
   }
+  }
+
+  return { candidates, sent };
+}
 
   return { candidates, sent };
 }
