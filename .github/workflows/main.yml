@@ -17,7 +17,7 @@ jobs:
           node-version: 20
           cache: 'pnpm'
       - run: pnpm install --no-frozen-lockfile
-      - run: pnpm exec tsx scripts/src/funding-bot.ts
+      - run: npx tsx scripts/src/funding-bot.ts
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
