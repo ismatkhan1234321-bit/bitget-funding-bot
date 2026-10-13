@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim();
 if (!BOT_TOKEN ||!CHAT_ID) throw new Error("TELEGRAM_BOT_TOKEN / CHAT_ID missing");
@@ -8,7 +10,21 @@ const BLACKLIST = ['USDC', 'BUSD', 'OIL', 'GOLD', 'SILVER'];
 
 // JAAN NAYA LOGIC - COOLDOWN SYSTEM
 const COOLDOWN_HOURS = 3;
-const sentCoins: Record<string, number> = {}; // symbol + ex -> timestamp
+const COOLDOWN_FILE = './cooldown.json';
+
+function loadCooldown(): Record<string, number> {
+  try {
+    if (fs.existsSync(COOLDOWN_FILE)) {
+      return JSON.parse(fs.readFileSync(COOLDOWN_FILE, 'utf8'));
+    }
+  } catch {}
+  return {};
+}
+function saveCooldown(data: Record<string, number>) {
+  try { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(data)); } catch {}
+}
+
+const sentCoins: Record<string, number> = loadCooldown();
 
 async function sendTelegram(msg: string) {
   try {
@@ -47,7 +63,6 @@ async function checkAll() {
 
   let allCoins: any[] = [];
 
-  // Bitget - ticker me change bhi lete hain Jaan
   const bgTickerMap: Record<string, {vol: number, change: number}> = {};
   (bitget.tickers || []).forEach((x:any)=> {
     bgTickerMap[x.symbol] = {
@@ -61,7 +76,6 @@ async function checkAll() {
     allCoins.push({ symbol: x.symbol, funding: parseFloat(x.fundingRate), vol: info.vol, change: info.change, ex: 'BITGET' });
   });
 
-  // Binance
   const bnTickerMap: Record<string, {vol: number, change: number}> = {};
   (binance.tickers || []).forEach((x:any)=> {
     bnTickerMap[x.symbol] = {
@@ -84,67 +98,54 @@ async function checkAll() {
     if(isNaN(coin.funding) || isNaN(coin.vol)) continue;
     if(coin.vol < VOL_MIN) continue;
 
-    // JAAN NAYA - COOLDOWN CHECK - 3 ghante me ek hi baar
     const key = `${coin.symbol}_${coin.ex}`;
     if(sentCoins[key]){
       const hoursPassed = (Date.now() - sentCoins[key]) / (1000 * 3600);
       if(hoursPassed < COOLDOWN_HOURS){
-        continue; // Skip - abhi 3 ghante nahi hue
+        continue;
       }
     }
 
     let type = null, tier = null, extraMsg = "";
 
-    // JAAN NAYA - PUMP SE PEHLE WALA LOGIC
+    // JAAN - PUMP SE PEHLE (aap jaisa chahte ho)
     if(coin.funding <= TIERS.LONG2){
-      // STRONG LONG - lekin sirf tab jab -5% se zyada gira ho (DUMP ke beech me)
       if(coin.change <= -5){
-        type="STRONG LONG";
-        tier="🔥🔥 SUPER SHORT SQUEEZE -0.5%";
-        extraMsg = `📉 Dump: ${coin.change.toFixed(1)}% | BUYERS AA RAHE HAIN`;
-      } else {
-        continue; // Pump ho chuka hai, skip karo
-      }
+        type="STRONG LONG"; tier="🔥🔥 SUPER SHORT SQUEEZE -0.5%";
+        extraMsg = `📉 Dump: ${coin.change.toFixed(1)}% | BUYERS AA RAHE HAIN - PUMP SE PEHLE`;
+      } else continue;
     }
     else if(coin.funding <= TIERS.LONG1){
-      if(coin.change <= -3){ // -3% se zyada gira ho
-        type="LONG";
-        tier="🔥 SHORT SQUEEZE -0.3%";
+      if(coin.change <= -3){
+        type="LONG"; tier="🔥 SHORT SQUEEZE -0.3%";
         extraMsg = `📉 Dump: ${coin.change.toFixed(1)}% | PUMP SE PEHLE`;
-      } else {
-        continue;
-      }
+      } else continue;
     }
     else if(coin.funding >= TIERS.SHORT2){
       if(coin.change >= 5){
-        type="STRONG SHORT";
-        tier="❄️❄️ SUPER LONG SQUEEZE +0.5%";
-        extraMsg = `📈 Pump: +${coin.change.toFixed(1)}% | SELLERS AA RAHE HAIN`;
-      } else {
-        continue;
-      }
+        type="STRONG SHORT"; tier="❄️❄️ SUPER LONG SQUEEZE +0.5%";
+        extraMsg = `📈 Pump: +${coin.change.toFixed(1)}% | SELLERS AA RAHE HAIN - DUMP SE PEHLE`;
+      } else continue;
     }
     else if(coin.funding >= TIERS.SHORT1){
       if(coin.change >= 3){
-        type="SHORT";
-        tier="❄️ LONG SQUEEZE +0.3%";
+        type="SHORT"; tier="❄️ LONG SQUEEZE +0.3%";
         extraMsg = `📈 Pump: +${coin.change.toFixed(1)}% | DUMP SE PEHLE`;
-      } else {
-        continue;
-      }
+      } else continue;
     }
     else continue;
 
     const msg = `${tier}\n${type} | ${coin.symbol} | ${coin.ex}\n\n💰 Funding: ${(coin.funding*100).toFixed(4)}%\n📊 Vol: $${(coin.vol/1e6).toFixed(1)}M\n${extraMsg}`;
     console.log(msg);
     await sendTelegram(msg);
-    sentCoins[key] = Date.now(); // Cooldown set
+    sentCoins[key] = Date.now();
+    saveCooldown(sentCoins);
     alerts++;
     await new Promise(r=>setTimeout(r, 400));
   }
 
-  if(alerts===0) console.log("No squeeze found - All normal (Cooldown active or no dump/pump)");
-  console.log(`Done. Alerts: ${alerts} | Cooldown list: ${Object.keys(sentCoins).length} coins`);
+  if(alerts===0) console.log("No squeeze found - All normal");
+  console.log(`Done. Alerts: ${alerts}`);
 }
 
 checkAll().catch(e=>{ console.error(e); process.exit(1); });
