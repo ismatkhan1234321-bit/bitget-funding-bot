@@ -1,20 +1,20 @@
 name: Funding Bot
 on:
   schedule:
-    - cron: '0 */3 * * *'  # JAAN NAYA - Har 3 ghante me 1 baar (15 min se change)
+    - cron: '0 */3 * * *'  # Har 3 ghante me 1 baar - spam khatam
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22  # JAAN NAYA - Node 20 deprecated tha, 22 kar diya
+          node-version: 22
           cache: 'pnpm'
       - run: pnpm install --no-frozen-lockfile
       - run: npx tsx scripts/src/funding-bot.ts
