@@ -1,23 +1,16 @@
 name: Funding Bot
 on:
   schedule:
-    - cron: '0 */3 * * *'  # Har 3 ghante me 1 baar - spam khatam
+    - cron: '*/10 * * * *'  # Har 10 minute - RECOMMENDED
   workflow_dispatch:
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: 'pnpm'
-      - run: pnpm install --no-frozen-lockfile
-      - run: npx tsx scripts/src/funding-bot.ts
+      - uses: actions/checkout@v3
+      - run: npm install
+      - run: npx ts-node scripts/src/funding-bot.ts
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
