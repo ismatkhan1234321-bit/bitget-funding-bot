@@ -1,113 +1,107 @@
-import * as fs from 'fs';
-
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim();
-if (!BOT_TOKEN || !CHAT_ID) throw new Error("TELEGRAM_BOT_TOKEN / CHAT_ID missing");
+if (!BOT_TOKEN || !CHAT_ID) throw new Error("TOKEN MISSING");
 
-const TIERS = { LONG1: -0.001, LONG2: -0.003, SHORT1: 0.001, SHORT2: 0.003, LONG_MED: -0.0006, SHORT_MED: 0.0006 };
-const VOL_MIN = 8_000_000;
-const BLACKLIST = ['USDC', 'BUSD', 'OIL', 'GOLD', 'SILVER'];
-const MAJORS_LOW_FILTER = ['BTCUSDT', 'ETHUSDT']; // Inko sirf high score par
+const VOL_MIN = 15_000_000; 
+let sentCoins: Record<string, number> = {};
+let watchlist: Record<string, number> = {}; // Naya Watchlist System
 
-async function sendTelegram(msg: string) {
+async function send(msg: string) {
   try {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: CHAT_ID, text: msg, parse_mode: 'Markdown' })
     });
-  } catch (e) { console.log("Telegram error", e); }
+  } catch(e){ console.log(e); }
 }
 
-async function getBitget() {
-  const url = `https://api.bitget.com/api/v2/mix/market/current-fund-rate?productType=USDT-FUTURES`;
-  const tickerUrl = `https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES`;
-  const [f, t]: any = await Promise.all([fetch(url).then(r => r.json()), fetch(tickerUrl).then(r => r.json())]);
-  return { exchange: 'BITGET', funding: f.data || [], tickers: t.data || [] };
-}
-async function getBinance() {
-  const fundingUrl = `https://fapi.binance.com/fapi/v1/premiumIndex`;
-  const tickerUrl = `https://fapi.binance.com/fapi/v1/ticker/24hr`;
-  const [f, t]: any = await Promise.all([fetch(fundingUrl).then(r => r.json()), fetch(tickerUrl).then(r => r.json())]);
-  return { exchange: 'BINANCE', funding: Array.isArray(f) ? f : [], tickers: Array.isArray(t) ? t : [] };
-}
+async function main() {
+  console.log("Scanning...");
+  
+  const fRes = await fetch("https://fapi.binance.com/fapi/v1/premiumIndex");
+  const tRes = await fetch("https://fapi.binance.com/fapi/v1/ticker/24hr");
 
-async function checkAll() {
-  console.log("Scanning LIVE - Clean Alerts...");
-  const [bitget, binance] = await Promise.all([getBitget(), getBinance()]);
-  let allCoins: any[] = [];
+  const fData: any = await fRes.json();
+  const tData: any = await tRes.json();
 
-  const bgTickerMap: Record<string, any> = {};
-  (bitget.tickers || []).forEach((x: any) => { 
-    // Bitget 24h change fix - chgUTC is like -0.012 = -1.2%
-    const changeRaw = parseFloat(x.chgUTC || 0);
-    const change = Math.abs(changeRaw) < 1 ? changeRaw * 100 : changeRaw;
-    bgTickerMap[x.symbol] = { vol: parseFloat(x.usdtVolume || 0), change: change, price: parseFloat(x.lastPr || 0) } 
-  });
-  (bitget.funding || []).forEach((x: any) => { 
-    if (!x.symbol) return; 
-    const info = bgTickerMap[x.symbol] || { vol: 0, change: 0, price: 0 }; 
-    allCoins.push({ symbol: x.symbol, funding: parseFloat(x.fundingRate), vol: info.vol, change: info.change, price: info.price, ex: 'BITGET' }); 
-  });
+  const fList = Array.isArray(fData) ? fData : [];
+  const tList = Array.isArray(tData) ? tData : [];
+  if (fList.length === 0 || tList.length === 0) return;
 
-  const bnTickerMap: Record<string, any> = {};
-  (binance.tickers || []).forEach((x: any) => { bnTickerMap[x.symbol] = { vol: parseFloat(x.quoteVolume || 0), change: parseFloat(x.priceChangePercent || 0), price: parseFloat(x.lastPrice || 0) } });
-  (binance.funding || []).forEach((x: any) => { 
-    if (!x.symbol?.includes('USDT')) return; 
-    const info = bnTickerMap[x.symbol] || { vol: 0, change: 0, price: 0 }; 
-    allCoins.push({ symbol: x.symbol, funding: parseFloat(x.lastFundingRate), vol: info.vol, change: info.change, price: info.price, ex: 'BINANCE' }); 
-  });
+  const map: any = {};
+  tList.forEach((x: any) => map[x.symbol] = x);
 
-  console.log(`Total Scanned: ${allCoins.length}`);
-  const scoredCoins: any[] = [];
+  let alerts = 0;
+  const now = Date.now();
 
-  for (let coin of allCoins) {
-    if (!coin.symbol.includes('USDT')) continue;
-    if (BLACKLIST.some(b => coin.symbol.includes(b))) continue;
-    if (isNaN(coin.funding) || isNaN(coin.vol)) continue;
-    if (coin.vol < VOL_MIN) continue;
-    // BTC/ETH ko low score par ignore karo
-    if (MAJORS_LOW_FILTER.includes(coin.symbol) && Math.abs(coin.funding) < 0.001) continue;
+  for (let x of fList) {
+    const sym = x.symbol;
+    if (!sym || !sym.includes('USDT')) continue;
+    const tk = map[sym];
+    if (!tk) continue;
 
-    let score = 0; let reasons: string[] = []; let type = ""; let tier = "";
+    const funding = parseFloat(x.lastFundingRate);
+    const vol = parseFloat(tk.quoteVolume);
+    const chg24h = parseFloat(tk.priceChangePercent);
+    const last = parseFloat(tk.lastPrice);
 
-    if (coin.funding <= TIERS.LONG2) { score += 3; tier = "🔥🔥 SUPER SHORT SQUEEZE"; type = "STRONG LONG"; reasons.push(`Funding ${(coin.funding * 100).toFixed(4)}% (Extreme)`); }
-    else if (coin.funding <= TIERS.LONG1) { score += 2; tier = "🔥 SHORT SQUEEZE"; type = "LONG"; reasons.push(`Funding ${(coin.funding * 100).toFixed(4)}%`); }
-    else if (coin.funding <= TIERS.LONG_MED) { score += 1; tier = "⚡ Early LONG"; type = "Early LONG"; }
-    else if (coin.funding >= TIERS.SHORT2) { score += 3; tier = "❄️❄️ SUPER LONG SQUEEZE"; type = "STRONG SHORT"; reasons.push(`Funding ${(coin.funding * 100).toFixed(4)}% (Extreme)`); }
-    else if (coin.funding >= TIERS.SHORT1) { score += 2; tier = "❄️ LONG SQUEEZE"; type = "SHORT"; reasons.push(`Funding ${(coin.funding * 100).toFixed(4)}%`); }
-    else if (coin.funding >= TIERS.SHORT_MED) { score += 1; tier = "⚡ Early SHORT"; type = "Early SHORT"; }
+    if (isNaN(funding) || isNaN(vol) || vol < VOL_MIN) continue;
+    
+    // 3 ghante ka cooldown
+    if (sentCoins[sym] && (now - sentCoins[sym]) < 3 * 3600 * 1000) continue;
 
-    if (type.includes("LONG") && coin.change <= -2.5) { score += 2; reasons.push(`Dump ${coin.change.toFixed(1)}% -> PUMP Expected`); }
-    else if (type.includes("LONG") && coin.change <= -0.8) { score += 1; }
-    if (type.includes("SHORT") && coin.change >= 2.5) { score += 2; reasons.push(`Pump +${coin.change.toFixed(1)}% -> DUMP Expected`); }
-    else if (type.includes("SHORT") && coin.change >= 0.8) { score += 1; }
+    // --- STEP 1: WATCHLIST ME DAALO (Relaxed Filters) ---
+    // Agar coin 3% se zyada gira hai aur funding negative hai, toh watchlist me daalo
+    if (chg24h <= -3 && chg24h > -20 && funding < -0.001) {
+      // Agar pehle se watchlist me nahi hai, toh daalo
+      if (!watchlist[sym]) {
+        watchlist[sym] = now;
+        console.log(`Added to Watchlist: ${sym} (Dump: ${chg24h}%, Funding: ${funding})`);
+        continue; // Agli baar check karenge
+      }
+    }
 
-    if (coin.vol > 30_000_000) { score += 1; }
+    // Watchlist se 6 ghante purane coins hata do
+    if (watchlist[sym] && (now - watchlist[sym]) > 6 * 3600 * 1000) {
+      delete watchlist[sym];
+      continue;
+    }
 
-    // Quality filter: kam se kam funding 0.06% ho ya score 3+ ho
-    if (Math.abs(coin.funding) < 0.0006 && score < 3) continue;
+    // --- STEP 2: TRIGGER CHECK (Sirf Watchlist walo ke liye) ---
+    if (watchlist[sym]) {
+      try {
+        const klineRes = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=15m&limit=25`);
+        const klines: any = await klineRes.json();
 
-    if (score >= 3) scoredCoins.push({ ...coin, score, tier, type, reasons });
-  }
+        if (klines && klines.length > 20) {
+          const closes = klines.map((k: any) => parseFloat(k[4]));
+          const opens = klines.map((k: any) => parseFloat(k[1]));
+          
+          const currentClose = closes[closes.length - 1];
+          const currentOpen = opens[opens.length - 1];
 
-  scoredCoins.sort((a, b) => b.score - a.score);
-  // Top 5 hi bhejo, quality alerts - pehle 10 bhej rahe the isliye BTC jaisa low quality bhi aa gaya
-  const toSend = scoredCoins.slice(0, 5);
+          // 20 EMA calculate karo (short term trend ke liye)
+          const recentCloses = closes.slice(-20);
+          const ema20 = recentCloses.reduce((a: number, b: number) => a + b, 0) / 20;
 
-  if (toSend.length === 0) {
-    console.log("Market Normal - No strong squeeze");
-  } else {
-    for (let coin of toSend) {
-      const emoji = coin.score >= 5 ? "🚀" : coin.score >= 4 ? "🔥" : "⚡";
-      const direction = coin.type.includes("LONG") ? "LONG 🟢" : "SHORT 🔴";
-      const msg = `${emoji} ${coin.tier}\n*SCORE ${coin.score}/8 | ${direction} | ${coin.symbol} | ${coin.ex}*\n\n💰 Price: $${coin.price}\n💸 Funding: ${(coin.funding * 100).toFixed(4)}%\n📊 Vol: $${(coin.vol / 1e6).toFixed(1)}M\n📈 24h: ${coin.change.toFixed(2)}%\n\n${coin.reasons.join("\n")}\n\n⏰ ${new Date().toLocaleTimeString()}`;
+          const isGreenCandle = currentClose > currentOpen;
+          const isAboveEma20 = currentClose > ema20;
 
-      console.log(msg);
-      await sendTelegram(msg);
-      await new Promise(r => setTimeout(r, 500));
+          // Agar Green Candle hai aur price 20 EMA ke upar hai -> ALERT!
+          if (isGreenCandle && isAboveEma20) {
+            text = `🔥 *SQUEEZE REVERSAL DETECTED* 🔥\n\n*${sym}*\nDump: ${chg24h.toFixed(2)}%\nFunding: ${(funding*100).toFixed(4)}%\nVol: $${(vol/1e6).toFixed(1)}M\nPrice: ${last}\n\n*Action: 15m Green Candle + Above EMA20. Entry le sakte hain!*`;
+            
+            await send(text);
+            sentCoins[sym] = now;
+            delete watchlist[sym]; // Alert ke baad watchlist se nikal do
+            alerts++;
+            await new Promise(r => setTimeout(r, 400));
+          }
+        }
+      } catch (err) {}
     }
   }
-  console.log(`Done. Alerts: ${toSend.length} / Scanned: ${allCoins.length}`);
+  console.log(`Done. Alerts: ${alerts} | Watchlist Size: ${Object.keys(watchlist).length}`);
 }
 
-checkAll().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1); });
+main().catch(e => { console.error(e); process.exit(1); });
