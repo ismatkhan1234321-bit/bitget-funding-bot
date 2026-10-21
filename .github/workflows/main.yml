@@ -1,23 +1,31 @@
-name: run-bot
+name: Rule7 Bot.pay - 5 Min Scanner
+
 on:
   schedule:
-    - cron: '*/10 * * * *'
-  workflow_dispatch:
+    - cron: '*/5 * * * *'  # Har 5 minute me chalega
+  workflow_dispatch:  # Manual bhi chala sakte ho
 
 jobs:
-  run-bot:
+  scan:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          version: 9
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'pnpm'
-      - run: pnpm install --no-frozen-lockfile
-      - run: npx tsx scripts/src/funding-bot.ts
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          pip install ccxt pandas
+          
+      - name: Run Rule7 Scanner - Current
+        run: |
+          python Rule7_bot.py --scan
+          
+      - name: Run Rule7 Scanner - 24h History
+        run: |
+          python Rule7_bot.py --history
