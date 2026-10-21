@@ -1,31 +1,19 @@
-name: Rule7 Bot.pay - 5 Min Scanner
+name: Rule7 Bot - 5 Min
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Har 5 minute me chalega
-  workflow_dispatch:  # Manual bhi chala sakte ho
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-        
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          
-      - name: Install dependencies
-        run: |
-          pip install ccxt pandas
-          
-      - name: Run Rule7 Scanner - Current
-        run: |
-          python Rule7_bot.py --scan
-          
-      - name: Run Rule7 Scanner - 24h History
-        run: |
-          python Rule7_bot.py --history
+      - run: pip install ccxt pandas
+      - run: ls -la && ls -la *.py *.pay || true
+      - run: python Rule7_bot.py --scan
+      - run: python Rule7_bot.py --history
