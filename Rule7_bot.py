@@ -1,11 +1,8 @@
-# RULE #7 V2 - FIXED FOR GITHUB ACTIONS (No Binance Ban)
-# Bybit + OKX - No Restriction - Top 50 Only
+# RULE #7 V2 - FIXED SYNTAX ERROR
 import ccxt
 import time
 import requests
-from datetime import datetime
 
-# ============ CONFIG ============
 TELEGRAM_BOT_TOKEN = "PUT_YOUR_BOT_TOKEN"
 TELEGRAM_CHAT_ID = "PUT_YOUR_CHAT_ID"
 
@@ -24,34 +21,27 @@ TOP_COINS = [
 
 TIMEFRAME = "15m"
 CANDLE_COUNT = 50
-MIN_VOLUME_24H = 10_000_000
+MIN_VOLUME_24H = 10000000
 MIN_PRICE = 0.0001
 
-# ============ FIXED EXCHANGE - NO BAN ============
 def get_exchange():
-    # Try Bybit first (best for GitHub)
     try:
         ex = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}})
         ex.load_markets()
-        print("✅ Connected: Bybit")
+        print("Connected: Bybit")
         return ex
     except Exception as e:
-        print(f"Bybit failed: {e}, trying OKX...")
-
-    # Fallback OKX
+        print(f"Bybit failed {e}, trying OKX")
     try:
         ex = ccxt.okx({'enableRateLimit': True})
         ex.load_markets()
-        print("✅ Connected: OKX")
+        print("Connected: OKX")
         return ex
-    except Exception as e:
-        print(f"OKX failed: {e}, trying Bitget...")
-    
-    # Last fallback Bitget
-    ex = ccxt.bitget({'enableRateLimit': True})
-    ex.load_markets()
-    print("✅ Connected: Bitget")
-    return ex
+    except:
+        ex = ccxt.bitget({'enableRateLimit': True})
+        ex.load_markets()
+        print("Connected: Bitget")
+        return ex
 
 exchange = get_exchange()
 
@@ -61,52 +51,55 @@ def send_telegram(msg):
     try:
         requests.post(url, data=data, timeout=10)
     except Exception as e:
-        print(f"Telegram Error: {e}")
+        print(f"Telegram Error {e}")
 
 def check_rule_7(symbol):
     try:
         ticker = exchange.fetch_ticker(symbol)
         price = ticker['last']
-        # OKX/Bybit me quoteVolume alag hota hai
-        volume_24h = ticker.get('quoteVolume') or ticker.get('baseVolume', 0) * price or 0
-
+        volume_24h = ticker.get('quoteVolume') or 0
+        if ticker.get('quoteVolume') is None:
+            volume_24h = ticker.get('baseVolume', 0) * price
         if price is None or price < MIN_PRICE:
             return None
         if volume_24h < MIN_VOLUME_24H:
             return None
-
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_COUNT+1)
         if len(ohlcv) < CANDLE_COUNT+1:
             return None
-
         prev_50 = ohlcv[:-1]
         current_price = ohlcv[-1][4]
-        
         high_50 = max([c[2] for c in prev_50])
         low_50 = min([c[3] for c in prev_50])
-
         signal = None
         break_level = None
-        # 0.1% buffer fake breakout se bachne ke liye
         if current_price > high_50 * 1.001:
             signal = "LONG"
             break_level = high_50
         elif current_price < low_50 * 0.999:
             signal = "SHORT"
             break_level = low_50
-
         if signal:
-            return {
-                "symbol": symbol,
-                "signal": signal,
-                "price": current_price,
-                "break": break_level,
-                "volume": volume_24h
-            }
+            return {"symbol": symbol, "signal": signal, "price": current_price, "break": break_level, "volume": volume_24h}
         return None
     except Exception as e:
-        print(f"Skip {symbol}: {e}")
+        print(f"Skip {symbol} {e}")
         return None
 
 def main_loop():
-    print(f"RULE #7 V2 Started - {len(TOP_COINS)} coins - {
+    total = len(TOP_COINS)
+    ex_id = exchange.id.upper()
+    print(f"RULE #7 V2 Started - {total} coins - {ex_id}")
+    signals_found = 0
+    for symbol in TOP_COINS:
+        result = check_rule_7(symbol)
+        if result:
+            msg = f"RULE #7\n{result['signal']} | {result['symbol']}\nPrice: {result['price']}\nBreak: {result['break']}\nVol: {result['volume']/1e6:.1f}M\nExchange: {ex_id}"
+            send_telegram(msg)
+            print(f"FOUND {result['symbol']} {result['signal']}")
+            signals_found += 1
+        time.sleep(0.4)
+    print(f"Done {signals_found} signals")
+
+if __name__ == "__main__":
+    main_loop()
