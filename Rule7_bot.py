@@ -1,85 +1,72 @@
-import ccxt, pandas as pd, os, requests
+# RULE #7 - V2 (No Shitcoins)
+import ccxt, time, requests
+from datetime import datetime
 
-EXCHANGE_IDS = ["bitget", "bybit", "okx"]
+TELEGRAM_BOT_TOKEN = "PUT_YOUR_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "PUT_YOUR_CHAT_ID"
+
+TOP_COINS = [
+    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
+    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
+    "LTC/USDT", "BCH/USDT", "MATIC/USDT", "UNI/USDT", "PEPE/USDT",
+    "SHIB/USDT", "ENA/USDT", "NEAR/USDT", "APT/USDT", "ARB/USDT",
+    "OP/USDT", "SUI/USDT", "ETC/USDT", "FIL/USDT", "XLM/USDT",
+    "HBAR/USDT", "INJ/USDT", "TIA/USDT", "STX/USDT", "MKR/USDT",
+    "RNDR/USDT", "WLD/USDT", "SEI/USDT", "JUP/USDT", "ONDO/USDT",
+    "AAVE/USDT", "TAO/USDT", "FET/USDT", "BONK/USDT", "WIF/USDT",
+    "FLOKI/USDT", "LDO/USDT", "STRK/USDT", "PYTH/USDT", "JTO/USDT",
+    "ORDI/USDT", "1000SATS/USDT", "BEAM/USDT", "BLUR/USDT", "PENDLE/USDT"
+]
+
 TIMEFRAME = "15m"
-VOLUME_THRESHOLD = 2_500_000
-CHANGE_PCT_THRESHOLD = 1.5
-TOP_SYMBOLS_LIMIT = 500
+CANDLE_COUNT = 50
+MIN_VOLUME_24H = 10_000_000
+MIN_PRICE = 0.0001
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or ""
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or ""
+exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
 
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(f"Missing secrets: TOKEN={bool(TELEGRAM_TOKEN)} CHAT={bool(CHAT_ID)}")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-        print(f"Telegram OK: {msg[:60]}")
-    except Exception as e:
-        print(f"Telegram fail: {e}")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+    requests.post(url, data=data)
 
-def get_exchange():
-    for ex_id in EXCHANGE_IDS:
-        try:
-            ex = getattr(ccxt, ex_id)()
-            ex.load_markets()
-            print(f"OK {ex_id}")
-            return ex
-        except: continue
-    raise Exception("No exchange")
+def check_rule_7(symbol):
+    ticker = exchange.fetch_ticker(symbol)
+    price = ticker['last']
+    volume_24h = ticker['quoteVolume']
+    
+    if price < MIN_PRICE: return None
+    if volume_24h < MIN_VOLUME_24H: return None
 
-def check_long(df):
-    df=df.copy()
-    df['high50']=df['h'].rolling(50).max().shift(1)
-    df['ema50']=df['c'].ewm(span=50).mean().shift(1)
-    df['change4']=(df['c']-df['c'].shift(4))/df['c'].shift(4)*100
-    if len(df)<52: return None
-    last, prev = df.iloc[-1], df.iloc[-2]
-    if prev['c']<=prev['high50'] and last['c']>last['high50'] and last['v']>VOLUME_THRESHOLD and last['change4']<CHANGE_PCT_THRESHOLD and last['c']>last['ema50']:
-        return {"side":"LONG","price":float(last['c']),"level":float(last['high50'])}
+    ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_COUNT+1)
+    prev_50 = ohlcv[:-1]
+    current_price = ohlcv[-1][4]
+    
+    high_50 = max([c[2] for c in prev_50])
+    low_50 = min([c[3] for c in prev_50])
+
+    signal = None
+    break_level = None
+    if current_price > high_50 * 1.001:
+        signal = "LONG"; break_level = high_50
+    elif current_price < low_50 * 0.999:
+        signal = "SHORT"; break_level = low_50
+
+    if signal:
+        return {"symbol": symbol, "signal": signal, "price": current_price, "break": break_level, "volume": volume_24h}
     return None
 
-def check_short(df):
-    df=df.copy()
-    df['low50']=df['l'].rolling(50).min().shift(1)
-    df['ema50']=df['c'].ewm(span=50).mean().shift(1)
-    df['change4']=(df['c']-df['c'].shift(4))/df['c'].shift(4)*100
-    if len(df)<52: return None
-    last, prev = df.iloc[-1], df.iloc[-2]
-    if prev['c']>=prev['low50'] and last['c']<last['low50'] and last['v']>VOLUME_THRESHOLD and last['change4']>-CHANGE_PCT_THRESHOLD and last['c']<last['ema50']:
-        return {"side":"SHORT","price":float(last['c']),"level":float(last['low50'])}
-    return None
+def main_loop():
+    while True:
+        signals = []
+        for symbol in TOP_COINS:
+            result = check_rule_7(symbol)
+            if result:
+                msg = f"🚨 RULE #7\n{result['signal']} | {result['symbol']}\nPrice: {result['price']}\nBreak: {result['break']}\nVol: ${result['volume']/1e6:.1f}M\nTop 50 scan"
+                send_telegram(msg)
+                signals.append(result)
+            time.sleep(0.3)
+        time.sleep(300)
 
-def get_top_symbols(ex):
-    tickers=ex.fetch_tickers()
-    all_usdt=[]
-    for s in ex.symbols:
-        if 'USDT' not in s: continue
-        base=s.split('/')[0].split(':')[0]
-        if base.startswith('R') and len(base)>=4 and base.isupper() and base not in ['RNDR','RUNE','RAY','RON','ROSE','RLC','RSR','RARE','RENDER']:
-            continue
-        all_usdt.append(s)
-    return sorted(all_usdt, key=lambda x: tickers.get(x,{}).get('quoteVolume',0) or 0, reverse=True)[:TOP_SYMBOLS_LIMIT]
-
-ex=get_exchange()
-symbols=get_top_symbols(ex)
-print(f"Scanning {len(symbols)} coins...")
-found=0
-for sym in symbols:
-    try:
-        ohlcv=ex.fetch_ohlcv(sym, TIMEFRAME, limit=60)
-        df=pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
-        sig=check_long(df) or check_short(df)
-        if sig:
-            found+=1
-            msg=f"🚨 *RULE #7*\n*{sig['side']}* | {sym}\nPrice: {sig['price']}\nBreak: {sig['level']}\n500 coins scan"
-            print(f">>> {sig['side']} | {sym}")
-            send_telegram(msg)
-    except: continue
-
-if found==0:
-    print("No signals - 500 coins scanned")
-else:
-    send_telegram(f"✅ Done: {found} signals in 500 coins")
+if __name__ == "__main__":
+    main_loop()
