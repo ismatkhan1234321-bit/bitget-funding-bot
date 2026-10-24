@@ -1,7 +1,11 @@
-# RULE #7 - V2 (No Shitcoins)
-import ccxt, time, requests
+# RULE #7 V2 - FIXED FOR GITHUB ACTIONS (No Binance Ban)
+# Bybit + OKX - No Restriction - Top 50 Only
+import ccxt
+import time
+import requests
 from datetime import datetime
 
+# ============ CONFIG ============
 TELEGRAM_BOT_TOKEN = "PUT_YOUR_BOT_TOKEN"
 TELEGRAM_CHAT_ID = "PUT_YOUR_CHAT_ID"
 
@@ -23,50 +27,86 @@ CANDLE_COUNT = 50
 MIN_VOLUME_24H = 10_000_000
 MIN_PRICE = 0.0001
 
-exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+# ============ FIXED EXCHANGE - NO BAN ============
+def get_exchange():
+    # Try Bybit first (best for GitHub)
+    try:
+        ex = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}})
+        ex.load_markets()
+        print("✅ Connected: Bybit")
+        return ex
+    except Exception as e:
+        print(f"Bybit failed: {e}, trying OKX...")
+
+    # Fallback OKX
+    try:
+        ex = ccxt.okx({'enableRateLimit': True})
+        ex.load_markets()
+        print("✅ Connected: OKX")
+        return ex
+    except Exception as e:
+        print(f"OKX failed: {e}, trying Bitget...")
+    
+    # Last fallback Bitget
+    ex = ccxt.bitget({'enableRateLimit': True})
+    ex.load_markets()
+    print("✅ Connected: Bitget")
+    return ex
+
+exchange = get_exchange()
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
-    requests.post(url, data=data)
+    try:
+        requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        print(f"Telegram Error: {e}")
 
 def check_rule_7(symbol):
-    ticker = exchange.fetch_ticker(symbol)
-    price = ticker['last']
-    volume_24h = ticker['quoteVolume']
-    
-    if price < MIN_PRICE: return None
-    if volume_24h < MIN_VOLUME_24H: return None
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        price = ticker['last']
+        # OKX/Bybit me quoteVolume alag hota hai
+        volume_24h = ticker.get('quoteVolume') or ticker.get('baseVolume', 0) * price or 0
 
-    ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_COUNT+1)
-    prev_50 = ohlcv[:-1]
-    current_price = ohlcv[-1][4]
-    
-    high_50 = max([c[2] for c in prev_50])
-    low_50 = min([c[3] for c in prev_50])
+        if price is None or price < MIN_PRICE:
+            return None
+        if volume_24h < MIN_VOLUME_24H:
+            return None
 
-    signal = None
-    break_level = None
-    if current_price > high_50 * 1.001:
-        signal = "LONG"; break_level = high_50
-    elif current_price < low_50 * 0.999:
-        signal = "SHORT"; break_level = low_50
+        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_COUNT+1)
+        if len(ohlcv) < CANDLE_COUNT+1:
+            return None
 
-    if signal:
-        return {"symbol": symbol, "signal": signal, "price": current_price, "break": break_level, "volume": volume_24h}
-    return None
+        prev_50 = ohlcv[:-1]
+        current_price = ohlcv[-1][4]
+        
+        high_50 = max([c[2] for c in prev_50])
+        low_50 = min([c[3] for c in prev_50])
+
+        signal = None
+        break_level = None
+        # 0.1% buffer fake breakout se bachne ke liye
+        if current_price > high_50 * 1.001:
+            signal = "LONG"
+            break_level = high_50
+        elif current_price < low_50 * 0.999:
+            signal = "SHORT"
+            break_level = low_50
+
+        if signal:
+            return {
+                "symbol": symbol,
+                "signal": signal,
+                "price": current_price,
+                "break": break_level,
+                "volume": volume_24h
+            }
+        return None
+    except Exception as e:
+        print(f"Skip {symbol}: {e}")
+        return None
 
 def main_loop():
-    while True:
-        signals = []
-        for symbol in TOP_COINS:
-            result = check_rule_7(symbol)
-            if result:
-                msg = f"🚨 RULE #7\n{result['signal']} | {result['symbol']}\nPrice: {result['price']}\nBreak: {result['break']}\nVol: ${result['volume']/1e6:.1f}M\nTop 50 scan"
-                send_telegram(msg)
-                signals.append(result)
-            time.sleep(0.3)
-        time.sleep(300)
-
-if __name__ == "__main__":
-    main_loop()
+    print(f"RULE #7 V2 Started - {len(TOP_COINS)} coins - {
