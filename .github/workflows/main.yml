@@ -21,10 +21,9 @@ jobs:
         
       - name: Run Scanner
         env:
-          # YAHAN GITHUB SECRETS SE KEYS PASS HO RAHI HAIN
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python bot.py # Agar aapki file ka naam alag hai, toh yahan change karein
+        run: python Rule7_bot.py  # <--- Yahan Rule7_bot.py kar diya hai
         
       - name: Commit state file
         run: |
