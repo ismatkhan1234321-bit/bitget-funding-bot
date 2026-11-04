@@ -51,20 +51,12 @@ def get_kl_15m(sym):
         return []
 
 def scan_market():
-    print("📥 Fetching Top 250 Best (High Volume) Coins from Binance...")
+    print("📥 Fetching Top 250 Best Coins from Binance...")
     try:
-        # Binance se 24h ticker data fetch kar rahe hain
         tickers = requests.get(f"{BASE_FAPI}/fapi/v1/ticker/24hr", timeout=15).json()
-        
-        # Sirf USDT pairs filter karo
         usdt_pairs = [t for t in tickers if t['symbol'].endswith('USDT')]
-        
-        # 24h Volume ke hisaab se sort karo (Sabse zyada volume wale upar)
         usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
-        
-        # Top 250 coins uthao (Bakwas/Dead coins filter ho jayenge)
-        coins = [t['symbol'] for t in usdt_pairs[:250]]
-        
+        coins = [t['symbol'] for t in usdt_pairs[:250]] # Top 250 coins
     except Exception as e:
         print(f"❌ Error fetching coins: {e}")
         return
@@ -76,14 +68,12 @@ def scan_market():
     print(f"🔍 Scanning {len(coins)} premium coins for 15m strict Sweeps...")
 
     for sym in coins:
-        # Cooldown: Agar 2 ghante me alert ja chuka hai toh skip karo
         if sym in state and current_time - state[sym] < 2 * 3600:
             continue
 
         kl = get_kl_15m(sym)
         if len(kl) < 55: continue
 
-        # Last CLOSED candle (Live candle nahi)
         closed_candle = kl[-2]
         
         past_50 = kl[-52:-2]
@@ -100,13 +90,11 @@ def scan_market():
         cur_close = float(closed_candle[4])
         cur_vol = float(closed_candle[5])
         
-        # ATR(14) Calculation
         last_14 = kl[-16:-2]
         atr = sum([float(k[2]) - float(k[3]) for k in last_14]) / 14
 
-        # --- STRICT STRATEGY CONDITIONS ---
-        vol_cond = cur_vol > 4.0 * avg_volume # Volume average se 4x zyada ho
-        atr_cond = (atr / cur_close) > 0.005  # Coin me kam se kam 0.5% ki movement ho
+        vol_cond = cur_vol > 4.0 * avg_volume
+        atr_cond = (atr / cur_close) > 0.005
         
         short_cond = (cur_high > highest_50 * 1.005) and (cur_close < highest_50 * 0.995)
         long_cond = (cur_low < lowest_50 * 0.995) and (cur_close > lowest_50 * 1.005)
@@ -128,7 +116,7 @@ def scan_market():
                 alerts_found += 1
                 time.sleep(1)
 
-        time.sleep(0.1) # Binance API limit se bachne ke liye
+        time.sleep(0.1)
 
     save_state(state)
     print(f"✅ Scan complete. Total alerts sent: {alerts_found}")
