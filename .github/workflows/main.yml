@@ -1,19 +1,35 @@
-name: scan
+name: Liquidity Sweep Telegram Alerter
+
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    - cron: '*/5 * * * *' # Har 5 minute me chalega
+  workflow_dispatch: # Manual run ke liye
+
 jobs:
-  scan:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install ccxt pandas requests
-      - name: Run
+          
+      - name: Install dependencies
+        run: pip install requests
+        
+      - name: Run Scanner
         env:
+          # YAHAN GITHUB SECRETS SE KEYS PASS HO RAHI HAIN
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python Rule7_bot.py
+        run: python bot.py # Agar aapki file ka naam alag hai, toh yahan change karein
+        
+      - name: Commit state file
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add telegram_state.json || true
+          git commit -m "Update state" || true
+          git push || true
