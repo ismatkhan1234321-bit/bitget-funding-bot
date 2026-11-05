@@ -5,13 +5,13 @@ import json
 import sys
 
 # ==========================================
-# 1. AUTOMATIC SECRETS FETCHING (GitHub Actions)
+# 1. TELEGRAM SECRETS
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    print("❌ ERROR: TELEGRAM_BOT_TOKEN ya TELEGRAM_CHAT_ID GitHub Secrets mein nahi mila!")
+    print("❌ ERROR: Telegram Tokens missing in GitHub Secrets!")
     sys.exit(1)
 
 BASE_FAPI = "https://fapi.binance.com"
@@ -21,15 +21,10 @@ def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code != 200:
-            print(f"⚠️ Telegram API Error: {r.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"⚠️ Telegram Network Error: {e}")
+        print(f"Telegram Error: {e}")
 
-# ==========================================
-# 2. STATE MANAGEMENT (Duplicate alerts rokne ke liye)
-# ==========================================
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -53,19 +48,39 @@ def get_kl_15m(sym):
 def scan_market():
     print("📥 Fetching Top 250 Best Coins from Binance...")
     try:
-        tickers = requests.get(f"{BASE_FAPI}/fapi/v1/ticker/24hr", timeout=15).json()
-        usdt_pairs = [t for t in tickers if t['symbol'].endswith('USDT')]
-        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
-        coins = [t['symbol'] for t in usdt_pairs[:250]] # Top 250 coins
+        response = requests.get(f"{BASE_FAPI}/fapi/v1/ticker/24hr", timeout=15)
+        
+        # YEH HAI FIX: Check karo ki Binance ne error toh nahi diya
+        if response.status_code != 200:
+            print(f"❌ Binance API BLOCKED! Status Code: {response.status_code}")
+            print(f"Details: {response.text}")
+            return
+
+        data = response.json()
+
+        # Check karo ki data list hai ya error dictionary
+        if not isinstance(data, list):
+            print(f"❌ Binance Error: {data}")
+            return
+
+        usdt_pairs = [t for t in data if isinstance(t, dict) and 'symbol' in t and t['symbol'].endswith('USDT')]
+        
+        if len(usdt_pairs) == 0:
+            print("❌ No coins found.")
+            return
+
+        usdt_pairs.sort(key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
+        coins = [t['symbol'] for t in usdt_pairs[:250]]
+        
     except Exception as e:
-        print(f"❌ Error fetching coins: {e}")
+        print(f"❌ Network Error: {e}")
         return
 
     state = load_state()
     current_time = time.time()
     alerts_found = 0
 
-    print(f"🔍 Scanning {len(coins)} premium coins for 15m strict Sweeps...")
+    print(f"🔍 Scanning {len(coins)} coins...")
 
     for sym in coins:
         if sym in state and current_time - state[sym] < 2 * 3600:
@@ -101,7 +116,7 @@ def scan_market():
 
         if vol_cond and atr_cond:
             if short_cond:
-                msg = f"🚨 *HIGH SWEEP (SHORT)* 🚨\n\n*Coin:* {sym}\n*Price:* {cur_close}\n*Volume:* {cur_vol/avg_volume:.1f}x Average\n*Wick High:* {cur_high}\n\n*Action:* Short setup forming on 15m. Check chart!"
+                msg = f"🚨 *HIGH SWEEP (SHORT)* 🚨\n\n*Coin:* {sym}\n*Price:* {cur_close}\n*Volume:* {cur_vol/avg_volume:.1f}x Average\n*Wick High:* {cur_high}"
                 send_telegram(msg)
                 print(f"✅ Alert sent for {sym} (SHORT)")
                 state[sym] = current_time
@@ -109,7 +124,7 @@ def scan_market():
                 time.sleep(1) 
                 
             elif long_cond:
-                msg = f"🚨 *LOW SWEEP (LONG)* 🚨\n\n*Coin:* {sym}\n*Price:* {cur_close}\n*Volume:* {cur_vol/avg_volume:.1f}x Average\n*Wick Low:* {cur_low}\n\n*Action:* Long setup forming on 15m. Check chart!"
+                msg = f"🚨 *LOW SWEEP (LONG)* 🚨\n\n*Coin:* {sym}\n*Price:* {cur_close}\n*Volume:* {cur_vol/avg_volume:.1f}x Average\n*Wick Low:* {cur_low}"
                 send_telegram(msg)
                 print(f"✅ Alert sent for {sym} (LONG)")
                 state[sym] = current_time
@@ -122,4 +137,6 @@ def scan_market():
     print(f"✅ Scan complete. Total alerts sent: {alerts_found}")
 
 if __name__ == "__main__":
+    # Test Telegram connection on start
+    send_telegram("✅ Bot Started: Scanning market for setups...")
     scan_market()
