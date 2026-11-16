@@ -2,7 +2,7 @@ name: Liquidity Sweep Alert Bot
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # Har 15 minute me chalega (candle close ke baad)
+    - cron: '*/15 * * * *' 
   workflow_dispatch:
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python sweep_bot.py
+        run: python sweep_bot.py  # <--- YAHAN SWEEP_BOT.PY HONA CHAHIYE
         
       - name: Commit state file
         run: |
