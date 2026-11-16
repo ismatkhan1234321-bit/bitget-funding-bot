@@ -1,0 +1,37 @@
+name: Liquidity Sweep Alert Bot
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # Har 15 minute me chalega (candle close ke baad)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        
+      - name: Run Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python sweep_bot.py
+        
+      - name: Commit state file
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add sweep_state.json || true
+          git commit -m "Update sweep state" || true
+          git push || true
